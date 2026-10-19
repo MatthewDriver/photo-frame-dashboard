@@ -2,6 +2,7 @@ package com.wesbos.homehq;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.admin.DevicePolicyManager;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -46,12 +47,16 @@ import android.widget.TextView;
  * - Offer the kiosk as a Home app (--ez home false undoes it), then pick it:
  *     adb shell am start -n com.wesbos.homehq/.MainActivity --ez home true
  *     adb shell cmd package set-home-activity com.wesbos.homehq/.Home
+ * - Let Home Assistant's Browser Mod switch the screen and set brightness (--ez fully false undoes it):
+ *     adb shell am start -n com.wesbos.homehq/.MainActivity --ez fully true
+ *     adb shell am start -n com.wesbos.homehq/.MainActivity --ez screen_admin true   (tap Activate)
  */
 public class MainActivity extends Activity {
   static final String TAG = "HomeHQ";
   static final String DEFAULT_URL = "https://home-dashboard.wesbos.workers.dev/";
   static final String PREFS = "kiosk";
   static final String PREF_URL = "url";
+  static final String PREF_FULLY = "fully";
   static final long EXIT_HOLD_MS = 1500;
   static final long RETRY_MS = 5000;
   static final long STALL_MS = 15000;
@@ -60,6 +65,7 @@ public class MainActivity extends Activity {
   static final float EXIT_SLOP_PX = 60;
 
   private WebView web;
+  private FullyBridge fully; // null unless the owner opted in
   private final Handler handler = new Handler(Looper.getMainLooper());
   // Not cleared in onDestroy, so a navigation rebind that has started always finishes.
   private final Handler rebindHandler = new Handler(Looper.getMainLooper());
@@ -130,6 +136,8 @@ public class MainActivity extends Activity {
     super.onCreate(state);
     applyDebugFlag(getIntent());
     applyHomeFlag(getIntent());
+    applyFullyFlag(getIntent());
+    applyScreenAdminFlag(getIntent());
     keepNavigationEnabled();
     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         | WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -147,6 +155,7 @@ public class MainActivity extends Activity {
       @Override
       public void onPageStarted(WebView view, String url, Bitmap icon) {
         pageFailed = false;
+        if (fully != null) fully.setPageUrl(url);
       }
 
       @Override
@@ -178,6 +187,14 @@ public class MainActivity extends Activity {
     FrameLayout root = new FrameLayout(this);
     root.addView(web);
     root.addView(buildOffline());
+    if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_FULLY, false)) {
+      View cover = new View(this);
+      root.addView(cover);
+      fully = new FullyBridge(this, web, cover);
+      fully.setAllowedUrl(savedUrl());
+      web.addJavascriptInterface(fully, FullyBridge.NAME);
+      Log.i(TAG, "window.fully bridge on");
+    }
     setContentView(root);
 
     String url = urlFrom(getIntent());
@@ -206,6 +223,11 @@ public class MainActivity extends Activity {
     setIntent(intent);
     applyDebugFlag(intent);
     applyHomeFlag(intent);
+    applyScreenAdminFlag(intent);
+    if (applyFullyFlag(intent)) {
+      recreate(); // the JavaScript interface can only be added before the page loads
+      return;
+    }
     String url = urlFrom(intent);
     if (url != null) {
       handler.removeCallbacks(retry);
@@ -227,6 +249,7 @@ public class MainActivity extends Activity {
     }
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_URL, saved).apply();
     Log.i(TAG, "Saved kiosk URL: " + saved);
+    if (fully != null) fully.setAllowedUrl(saved);
     return saved;
   }
 
@@ -390,6 +413,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onDestroy() {
     unregisterReceiver(networkChange);
+    if (fully != null) fully.release();
     handler.removeCallbacksAndMessages(null);
     if (web != null) web.destroy();
     super.onDestroy();
@@ -410,6 +434,34 @@ public class MainActivity extends Activity {
         home ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED : PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
         PackageManager.DONT_KILL_APP);
     Log.i(TAG, "Home alias " + (home ? "on" : "off"));
+  }
+
+  /** Saves the "fully" extra. Returns true if the setting changed, so the page must be rebuilt. */
+  private boolean applyFullyFlag(Intent intent) {
+    if (intent == null || !intent.hasExtra(PREF_FULLY)) return false;
+    boolean on = intent.getBooleanExtra(PREF_FULLY, false);
+    boolean was = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_FULLY, false);
+    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_FULLY, on).apply();
+    Log.i(TAG, "window.fully bridge " + (on ? "on" : "off"));
+    return on != was;
+  }
+
+  /** true asks Android to make the kiosk a device admin (force-lock only); false removes it. */
+  private void applyScreenAdminFlag(Intent intent) {
+    if (intent == null || !intent.hasExtra("screen_admin")) return;
+    ComponentName admin = FullyBridge.admin(this);
+    boolean add = intent.getBooleanExtra("screen_admin", false);
+    intent.removeExtra("screen_admin"); // a recreate() sees the same intent; ask only once
+    if (add) {
+      startActivity(new Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+          .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin)
+          .putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+              "Lets Home Assistant switch the frame's screen off through Browser Mod."));
+    } else {
+      DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
+      if (dpm != null && dpm.isAdminActive(admin)) dpm.removeActiveAdmin(admin);
+      Log.i(TAG, "Screen admin removed");
+    }
   }
 
   /** Watches for the two-finger exit hold; all touches still go to the page. */

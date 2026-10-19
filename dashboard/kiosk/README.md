@@ -114,6 +114,39 @@ To build your own dashboard for a PF1007L frame, see
 [building-for-the-frame.md](../../docs/building-for-the-frame.md): what WebView 106 supports,
 what to avoid, and how to test on the frame.
 
+## Home Assistant screen control (Browser Mod)
+
+If the dashboard is a Home Assistant page, [Browser Mod](https://github.com/thomasloven/hass-browser_mod)
+can already change its page, reload it and show pop-ups. Its screen switch, though, only lays a black
+cover over the page, and the backlight stays on. For real Fully Kiosk Browser, Browser Mod uses its
+`window.fully` JavaScript API instead. Home HQ can provide the few calls Browser Mod makes, so the
+same switch turns the backlight off and on and sets the brightness. Off by default:
+
+```sh
+adb shell am start -n com.wesbos.homehq/.MainActivity --ez fully true          # undo: --ez fully false
+adb shell am start -n com.wesbos.homehq/.MainActivity --ez screen_admin true   # tap Activate; undo: --ez screen_admin false
+```
+
+- `fully true` adds `window.fully` to the page. It answers only pages from the saved dashboard URL's
+  origin (scheme, host and port), and logs and ignores calls from any other page.
+- `screen_admin true` opens Android's "Activate device administrator?" screen. Its only policy is
+  **Lock the screen**, which is how the screen is switched off. Without it, "off" is the black cover at
+  minimum window brightness.
+- Provided: `bind`, `getScreenOn`, `turnScreenOn`, `turnScreenOff`, `stopScreensaver`,
+  `getScreenBrightness`, `setScreenBrightness` (0-255), plus empty `getDeviceId` and
+  `getCamshotJpgBase64`. Device details (MAC, serial, IMEI and so on) are left out on purpose. Browser
+  Mod reads them inside a `try`, so it carries on without them.
+- Brightness is the kiosk window's own brightness, so it applies while Home HQ is on screen.
+- Register the frame's browser in Browser Mod first. A non-admin login can't do that from the frame, so
+  an admin registers its Browser ID (shown in the Browser Mod panel on the frame).
+
+Tested on one Frameo "112K" ([frameo-102k-a33.md](../../docs/frameo-102k-a33.md), Allwinner A33,
+Android 6.0.1, WebView 106) with Browser Mod 3.3.0 on Home Assistant 2026.10.2. The Browser Mod
+screen light switched the display off (`dumpsys power`: `Display Power: state=OFF`) and back on, also
+after 5 minutes off. It set the window brightness (40 gave `0.157`, 204 gave `0.8`) and still worked
+after a reboot. The page is not paused while the screen is off, so Browser Mod stays connected. Not
+tested: other Android versions, and frames with a lock screen (this one has no SystemUI).
+
 ## When the dashboard can't load
 
 If the dashboard fails to load, Home HQ covers WebView's error page with its own
