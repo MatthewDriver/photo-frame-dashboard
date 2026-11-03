@@ -15,6 +15,7 @@ import android.graphics.Color;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -50,6 +51,9 @@ import android.widget.TextView;
  * - Let Home Assistant's Browser Mod switch the screen and set brightness (--ez fully false undoes it):
  *     adb shell am start -n com.wesbos.homehq/.MainActivity --ez fully true
  *     adb shell am start -n com.wesbos.homehq/.MainActivity --ez screen_admin true   (tap Activate)
+ * - Test the bridge's Wi-Fi watchdog: drops Wi-Fi as an access point would, without switching it off.
+ *   With the screen off, Android won't rejoin by itself; the watchdog should within about 2 minutes:
+ *     adb shell am start -n com.wesbos.homehq/.MainActivity --ez wifi_disconnect true
  */
 public class MainActivity extends Activity {
   static final String TAG = "HomeHQ";
@@ -138,6 +142,7 @@ public class MainActivity extends Activity {
     applyHomeFlag(getIntent());
     applyFullyFlag(getIntent());
     applyScreenAdminFlag(getIntent());
+    applyWifiDisconnectFlag(getIntent());
     keepNavigationEnabled();
     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         | WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -224,6 +229,7 @@ public class MainActivity extends Activity {
     applyDebugFlag(intent);
     applyHomeFlag(intent);
     applyScreenAdminFlag(intent);
+    applyWifiDisconnectFlag(intent);
     if (applyFullyFlag(intent)) {
       recreate(); // the JavaScript interface can only be added before the page loads
       return;
@@ -244,13 +250,23 @@ public class MainActivity extends Activity {
     // The activity is exported, so only save web URLs: never file:, content: or javascript:.
     String scheme = Uri.parse(saved).getScheme();
     if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
-      Log.w(TAG, "Ignoring non-web kiosk URL: " + saved);
+      Log.w(TAG, "Ignoring non-web kiosk URL (scheme " + scheme + ")");
       return null;
     }
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_URL, saved).apply();
-    Log.i(TAG, "Saved kiosk URL: " + saved);
+    Log.i(TAG, "Saved kiosk URL: " + forLog(saved));
     if (fully != null) fully.setAllowedUrl(saved);
     return saved;
+  }
+
+  /** A URL can carry a token in its query, fragment or user info, so those are never logged. */
+  static String forLog(String url) {
+    Uri u = Uri.parse(url);
+    String port = u.getPort() == -1 ? "" : ":" + u.getPort();
+    String path = u.getEncodedPath() == null ? "" : u.getEncodedPath();
+    boolean hidden = u.getEncodedUserInfo() != null || u.getEncodedQuery() != null
+        || u.getEncodedFragment() != null;
+    return u.getScheme() + "://" + u.getHost() + port + path + (hidden ? " (query, fragment or user info not logged)" : "");
   }
 
   private String savedUrl() {
@@ -444,6 +460,15 @@ public class MainActivity extends Activity {
     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_FULLY, on).apply();
     Log.i(TAG, "window.fully bridge " + (on ? "on" : "off"));
     return on != was;
+  }
+
+  /** Test hook for WifiWatchdog: disconnects from the current network but leaves Wi-Fi on. */
+  private void applyWifiDisconnectFlag(Intent intent) {
+    if (intent == null || !intent.getBooleanExtra("wifi_disconnect", false)) return;
+    intent.removeExtra("wifi_disconnect"); // a recreate() sees the same intent; disconnect only once
+    WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+    if (wifi != null) wifi.disconnect();
+    Log.w(TAG, "Wi-Fi disconnected for a watchdog test");
   }
 
   /** true asks Android to make the kiosk a device admin (force-lock only); false removes it. */

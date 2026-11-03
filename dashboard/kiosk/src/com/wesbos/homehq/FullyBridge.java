@@ -18,8 +18,8 @@ import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Optional `window.fully` stand-in, so Home Assistant's Browser Mod can switch the frame's screen
@@ -33,20 +33,43 @@ import java.util.Map;
  * Without it, "off" is a black cover at minimum brightness and the backlight may stay lit.
  *
  * Every call is ignored unless the page comes from the same origin as the saved dashboard URL.
+ * That check sees only the top page, and Android gives `fully` to every frame in it, so bind()
+ * never stores the page's JavaScript: an event runs Browser Mod's own fixed handler, nothing else.
+ *
+ * While the bridge is on, WifiWatchdog rejoins Wi-Fi if the frame drops off with the screen off.
+ *
+ * Browser Mod binds its screen events on every page load. If it hasn't within 2 minutes, the page
+ * is reloaded (then every 5 minutes). This happens when HA updates: the page reloads while HA is
+ * still starting, Browser Mod's script isn't served yet, and HA can no longer reach the frame.
  */
 class FullyBridge {
   static final String TAG = "HomeHQ";
   static final String NAME = "fully";
+  static final long BIND_FIRST_MS = 2 * 60_000;
+  static final long BIND_AGAIN_MS = 5 * 60_000;
 
   private final Activity activity;
   private final WebView web;
   private final View cover;
   private final Handler ui = new Handler(Looper.getMainLooper());
-  private final Map<String, String> events = new HashMap<>();
+  private final Set<String> events = new HashSet<>(); // events Browser Mod has bound on this page
   private volatile String allowedOrigin;
   private volatile String pageOrigin;
   private volatile int brightness = -1; // -1: system default
   private volatile boolean covered;
+  private volatile boolean bound; // Browser Mod has bound events on this page
+  private boolean reloaded; // the last page load was ours, after Browser Mod didn't bind
+  private final WifiWatchdog wifi;
+
+  private final Runnable noBrowserMod = new Runnable() {
+    @Override
+    public void run() {
+      if (bound) return;
+      Log.w(TAG, "Browser Mod hasn't connected since the page loaded, reloading");
+      reloaded = true;
+      web.reload();
+    }
+  };
 
   private final BroadcastReceiver screen = new BroadcastReceiver() {
     @Override
@@ -65,10 +88,14 @@ class FullyBridge {
     IntentFilter f = new IntentFilter(Intent.ACTION_SCREEN_ON);
     f.addAction(Intent.ACTION_SCREEN_OFF);
     activity.registerReceiver(screen, f);
+    wifi = new WifiWatchdog(activity);
+    wifi.start();
   }
 
   void release() {
     activity.unregisterReceiver(screen);
+    ui.removeCallbacks(noBrowserMod);
+    wifi.stop();
   }
 
   /** The dashboard URL decides which origin may use the bridge. */
@@ -82,6 +109,10 @@ class FullyBridge {
     synchronized (events) {
       events.clear(); // a new page binds its own handlers
     }
+    bound = false;
+    ui.removeCallbacks(noBrowserMod);
+    ui.postDelayed(noBrowserMod, reloaded ? BIND_AGAIN_MS : BIND_FIRST_MS);
+    reloaded = false;
   }
 
   static String origin(String url) {
@@ -107,18 +138,24 @@ class FullyBridge {
   }
 
   private void fire(String event) {
-    String js;
     synchronized (events) {
-      js = events.get(event);
+      if (!events.contains(event)) return;
     }
-    if (js != null) web.evaluateJavascript(js, null);
+    // event is one of our own two constants, so this string is fixed
+    web.evaluateJavascript("window.browser_mod && window.browser_mod.fullyEvent(\"" + event + "\");", null);
   }
 
+  /** Only the two events this bridge fires. The page's js is ignored: see the class comment. */
   @JavascriptInterface
   public void bind(String event, String js) {
     if (!allowed()) return;
+    if (!"screenOn".equals(event) && !"screenOff".equals(event)) return;
     synchronized (events) {
-      events.put(event, js);
+      events.add(event);
+    }
+    if (!bound) {
+      bound = true;
+      Log.i(TAG, "Browser Mod connected");
     }
   }
 

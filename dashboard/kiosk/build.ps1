@@ -4,11 +4,14 @@
 # If Windows blocks the unsigned script, run it once with:
 #   powershell -ExecutionPolicy Bypass -File .\build.ps1
 # Install on the tablet: adb install -r build\homehq.apk
+# With only JDK 21 (e.g. Android Studio's JBR), d8 from build-tools 34 throws a NullPointerException.
+# Use newer build-tools instead:  .\build.ps1 -BuildTools 36.0.0
+param([string]$BuildTools = '34.0.0')
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { "$env:LOCALAPPDATA\Android\Sdk" }
-$bt  = "$sdk\build-tools\34.0.0"
+$bt  = "$sdk\build-tools\$BuildTools"
 $jar = "$sdk\platforms\android-34\android.jar"
 $ks  = "$env:USERPROFILE\.android\debug.keystore"
 if (-not (Test-Path $jar)) { throw "android.jar not found at $jar" }
@@ -26,7 +29,7 @@ Run "$bt\aapt2.exe" @('link', '-o', 'build\base.apk', '-I', $jar, '--manifest', 
   '--java', 'build\gen', '--min-sdk-version', '23', '--target-sdk-version', '23', '--version-code', '2', '--version-name', '1.1')
 
 $src = @(Get-ChildItem src -Recurse -Filter *.java | % FullName) + @('build\gen\com\wesbos\homehq\R.java')
-Run 'javac' (@('-nowarn', '-source', '8', '-target', '8', '-classpath', $jar, '-d', 'build\classes') + $src)
+Run 'javac' (@('-nowarn', '--release', '8', '-classpath', $jar, '-d', 'build\classes') + $src)
 
 $classes = Get-ChildItem build\classes -Recurse -Filter *.class | % FullName
 Run "$bt\d8.bat" (@('--min-api', '23', '--lib', $jar, '--output', 'build') + $classes)
